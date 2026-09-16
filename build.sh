@@ -5,8 +5,10 @@
 #
 # It stamps the fork's own version status onto the build. Without it, our engine and our
 # GodotSharp NuGet packages claim the exact version and package IDs that upstream Godot
-# publishes (e.g. Godot.NET.Sdk 4.7.3-rc), so a locally built package silently shadows the
-# official one in ~/.nuget/packages for every project on this machine.
+# publishes. This branch is rooted at the 4.7.2-stable tag, where version.py already reads
+# status = "stable", so an unmarked build produces Godot.NET.Sdk 4.7.2 -- the very package
+# Godot shipped -- and silently shadows it in ~/.nuget/packages for every project on this
+# machine. There is no -rc suffix left to tell the two apart.
 #
 # Usage:  ./build.sh [scons args...]
 #   ./build.sh target=editor module_mono_enabled=yes -j$(nproc)
