@@ -35,6 +35,20 @@ runs:
         sudo apt-get update
         sudo apt-get install -y libwayland-bin
 
+    # Godot's own toolchain, as used by the official builds. Binaries need glibc 2.34 whatever the runner has.
+    - name: Install Godot Linux SDK
+      if: inputs.platform == 'linuxbsd'
+      shell: bash
+      run: |
+        sdk_name=x86_64-godot-linux-gnu_sdk-buildroot
+        cd "$RUNNER_TEMP"
+        curl -fsSL -o sdk.tar.bz2 "https://github.com/godotengine/buildroot/releases/download/${GODOT_SDK_VERSION}/${sdk_name}.tar.bz2"
+        tar xf sdk.tar.bz2
+        rm sdk.tar.bz2
+        cd "$sdk_name"
+        ./relocate-sdk.sh
+        echo "$PWD/bin" >> "$GITHUB_PATH"
+
     - name: Setup Python and SCons
       uses: ./.github/actions/godot-deps
 

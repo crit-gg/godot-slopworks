@@ -13,6 +13,7 @@ env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   NUGET_SOURCE: https://nuget.crit.gg/v3/index.json
+  GODOT_SDK_VERSION: godot-2026.05.x-1
 
 jobs:
   prepare:
@@ -47,8 +48,7 @@ jobs:
   editor-linux:
     name: Editor (Linux)
     needs: prepare
-    # One LTS behind latest, so the binaries run on older glibc.
-    runs-on: ${{ vars.SLOP_RUNNER_LINUX || 'ubuntu-22.04' }}
+    runs-on: ${{ vars.SLOP_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 240
     steps:
       - name: Checkout
@@ -64,7 +64,8 @@ jobs:
   build:
     name: ${{ matrix.title }}
     needs: prepare
-    runs-on: ${{ matrix.platform == 'windows' && (vars.SLOP_RUNNER_MINGW || 'ubuntu-24.04') || (vars.SLOP_RUNNER_LINUX || 'ubuntu-22.04') }}
+    # Ubuntu 24.04 or newer. Older images ship MinGW GCC 10 and Godot needs GCC 11.
+    runs-on: ${{ vars.SLOP_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 240
     strategy:
       fail-fast: true
@@ -79,7 +80,6 @@ jobs:
             platform: linuxbsd
             target: template_release
           # Cross compiled with MinGW, as the official Windows builds are.
-          # Ubuntu 22.04 ships MinGW GCC 10, which is older than the GCC 11 Godot requires.
           - title: Editor (Windows)
             name: editor-windows
             platform: windows
@@ -110,7 +110,7 @@ jobs:
   dotnet:
     name: C# assemblies and packages
     needs: [prepare, editor-linux]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       SLOP_PACKAGE_SUFFIX: ${{ needs.prepare.outputs.suffix }}
