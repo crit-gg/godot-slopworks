@@ -25,8 +25,8 @@ runs:
       shell: bash
       run: |
         dnf -y install --setopt=install_weak_deps=False \
-          mingw64-gcc mingw64-gcc-c++ mingw64-winpthreads-static \
-          python3 python3-pip tar zstd unzip
+          bash binutils bzip2 curl file findutils gettext git make patch pkgconfig python3-pip unzip which xz tar zstd \
+          mingw64-gcc mingw64-gcc-c++ mingw64-winpthreads-static
         python3 -m pip install scons==4.10.1
 
     - name: Install Linux build dependencies
