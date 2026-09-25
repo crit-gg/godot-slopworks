@@ -63,6 +63,12 @@ runs:
           echo "enabled=no" >> "$GITHUB_OUTPUT"
         fi
 
+    # The Windows platform enables Direct3D 12 by default, and it needs Mesa NIR, the Agility SDK and PIX.
+    - name: Download Direct3D 12 dependencies
+      if: inputs.platform == 'windows'
+      shell: bash
+      run: python ./misc/scripts/install_d3d12_sdk_windows.py
+
     # Keyed on the branch so every release run on it reuses the previous run's objects.
     - name: Restore SCons cache
       uses: actions/cache/restore@v6
