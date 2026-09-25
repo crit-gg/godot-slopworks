@@ -66,6 +66,7 @@ jobs:
     needs: prepare
     # Ubuntu 24.04 or newer. Older images ship MinGW GCC 10 and Godot needs GCC 11.
     runs-on: ${{ vars.SLOP_RUNNER || 'ubuntu-24.04' }}
+    container: ${{ matrix.platform == 'windows' && 'fedora:44' || '' }}
     timeout-minutes: 240
     strategy:
       fail-fast: true
@@ -135,10 +136,13 @@ jobs:
           ./bin/godot.linuxbsd.editor.x86_64.mono --headless --generate-mono-glue ./modules/mono/glue
 
       # GodotTools differs per platform, so the editor bundles are built twice. The packages do not.
+      # GodotTools.csproj reads the API assemblies from bin/GodotSharp, so both builds must output to bin.
       - name: Build assemblies and packages
         run: |
-          ./build_packages.py --godot-output-dir=./out/linuxbsd --godot-platform=linuxbsd --push-nupkgs-local="$PWD/nupkgs"
-          ./build_packages.py --godot-output-dir=./out/windows --godot-platform=windows
+          ./build_packages.py --godot-output-dir=./bin --godot-platform=linuxbsd --push-nupkgs-local="$PWD/nupkgs"
+          mkdir -p out/linuxbsd && cp -r bin/GodotSharp out/linuxbsd/
+          ./build_packages.py --godot-output-dir=./bin --godot-platform=windows
+          mkdir -p out/windows && cp -r bin/GodotSharp out/windows/
           ls -l nupkgs
 
       - name: Upload Linux editor assemblies
