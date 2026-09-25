@@ -1,0 +1,237 @@
+name: Slopworks Release
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: slop-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  GODOT_VERSION_STATUS: slopworks
+  # Matches the official release builds, which also turns on LTO.
+  SCONS_FLAGS: production=yes module_mono_enabled=yes verbose=yes warnings=no progress=no
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  NUGET_SOURCE: https://nuget.crit.gg/v3/index.json
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      godot-version: ${{ steps.version.outputs.godot-version }}
+      suffix: ${{ steps.version.outputs.suffix }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          godot_version=$(python3 -c "import version; print(f'{version.major}.{version.minor}.{version.patch}')")
+          suffix=$(git rev-parse --short=7 HEAD)
+          tag="${godot_version}-${GODOT_VERSION_STATUS}-${suffix}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "::error::Release $tag already exists."
+            exit 1
+          fi
+          echo "godot-version=$godot_version" >> "$GITHUB_OUTPUT"
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag"
+
+  # Separate from the matrix so the .NET job can start as soon as it finishes.
+  editor-linux:
+    name: Editor (Linux)
+    needs: prepare
+    # One LTS behind latest, so the binaries run on older glibc.
+    runs-on: ${{ vars.SLOP_RUNNER_LINUX || 'ubuntu-22.04' }}
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build
+        uses: ./.github/actions/slop-build
+        with:
+          name: editor-linux
+          platform: linuxbsd
+          target: editor
+
+  build:
+    name: ${{ matrix.title }}
+    needs: prepare
+    runs-on: ${{ matrix.platform == 'windows' && (vars.SLOP_RUNNER_MINGW || 'ubuntu-24.04') || (vars.SLOP_RUNNER_LINUX || 'ubuntu-22.04') }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - title: Template debug (Linux)
+            name: template-debug-linux
+            platform: linuxbsd
+            target: template_debug
+          - title: Template release (Linux)
+            name: template-release-linux
+            platform: linuxbsd
+            target: template_release
+          # Cross compiled with MinGW, as the official Windows builds are.
+          # Ubuntu 22.04 ships MinGW GCC 10, which is older than the GCC 11 Godot requires.
+          - title: Editor (Windows)
+            name: editor-windows
+            platform: windows
+            target: editor
+            scons-flags: use_mingw=yes
+          - title: Template debug (Windows)
+            name: template-debug-windows
+            platform: windows
+            target: template_debug
+            scons-flags: use_mingw=yes
+          - title: Template release (Windows)
+            name: template-release-windows
+            platform: windows
+            target: template_release
+            scons-flags: use_mingw=yes
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build
+        uses: ./.github/actions/slop-build
+        with:
+          name: ${{ matrix.name }}
+          platform: ${{ matrix.platform }}
+          target: ${{ matrix.target }}
+          scons-flags: ${{ matrix.scons-flags }}
+
+  dotnet:
+    name: C# assemblies and packages
+    needs: [prepare, editor-linux]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      SLOP_PACKAGE_SUFFIX: ${{ needs.prepare.outputs.suffix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Download Linux editor
+        uses: actions/download-artifact@v8
+        with:
+          name: editor-linux
+          path: bin
+
+      - name: Generate C# glue
+        run: |
+          chmod +x bin/godot.*
+          ./bin/godot.linuxbsd.editor.x86_64.mono --headless --generate-mono-glue ./modules/mono/glue
+
+      # GodotTools differs per platform, so the editor bundles are built twice. The packages do not.
+      - name: Build assemblies and packages
+        run: |
+          ./build_packages.py --godot-output-dir=./out/linuxbsd --godot-platform=linuxbsd --push-nupkgs-local="$PWD/nupkgs"
+          ./build_packages.py --godot-output-dir=./out/windows --godot-platform=windows
+          ls -l nupkgs
+
+      - name: Upload Linux editor assemblies
+        uses: actions/upload-artifact@v7
+        with:
+          name: godotsharp-linux
+          path: out/linuxbsd/GodotSharp
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows editor assemblies
+        uses: actions/upload-artifact@v7
+        with:
+          name: godotsharp-windows
+          path: out/windows/GodotSharp
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: nupkgs
+          path: nupkgs/*.nupkg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: [prepare, editor-linux, build, dotnet]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      GODOT_VERSION: ${{ needs.prepare.outputs.godot-version }}
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@v8
+        with:
+          path: raw
+
+      - name: Assemble editors and templates
+        run: |
+          base="Godot_v${TAG}_mono"
+          mkdir -p dist
+
+          linux="${base}_linux_x86_64"
+          mkdir -p "$linux"
+          cp raw/editor-linux/godot.linuxbsd.editor.x86_64.mono "$linux/${base}_linux.x86_64"
+          cp -r raw/godotsharp-linux "$linux/GodotSharp"
+          chmod +x "$linux/${base}_linux.x86_64"
+          zip -q -9 -r "dist/${linux}.zip" "$linux"
+
+          windows="${base}_win64"
+          mkdir -p "$windows"
+          cp raw/editor-windows/godot.windows.editor.x86_64.mono.exe "$windows/${windows}.exe"
+          cp raw/editor-windows/godot.windows.editor.x86_64.mono.console.exe "$windows/${windows}_console.exe"
+          cp -r raw/godotsharp-windows "$windows/GodotSharp"
+          zip -q -9 -r "dist/${windows}.zip" "$windows"
+
+          # The editor looks for templates under export_templates/<version>.<status>.mono.
+          mkdir -p templates
+          echo "${GODOT_VERSION}.${GODOT_VERSION_STATUS}.mono" > templates/version.txt
+          cp raw/template-debug-linux/godot.linuxbsd.template_debug.x86_64.mono templates/linux_debug.x86_64
+          cp raw/template-release-linux/godot.linuxbsd.template_release.x86_64.mono templates/linux_release.x86_64
+          cp raw/template-debug-windows/godot.windows.template_debug.x86_64.mono.exe templates/windows_debug_x86_64.exe
+          cp raw/template-debug-windows/godot.windows.template_debug.x86_64.mono.console.exe templates/windows_debug_x86_64_console.exe
+          cp raw/template-release-windows/godot.windows.template_release.x86_64.mono.exe templates/windows_release_x86_64.exe
+          cp raw/template-release-windows/godot.windows.template_release.x86_64.mono.console.exe templates/windows_release_x86_64_console.exe
+          chmod +x templates/linux_*
+          zip -q -9 -r -D "dist/${base}_export_templates.tpz" templates/*
+
+          cp raw/nupkgs/*.nupkg dist/
+          ls -l dist
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Push packages
+        run: |
+          dotnet nuget push "raw/nupkgs/*.nupkg" \
+            --api-key "${{ secrets.CRIT_NUGET_API_KEY }}" \
+            --source "$NUGET_SOURCE" \
+            --skip-duplicate
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "$TAG" \
+            --notes "Godot ${GODOT_VERSION} Slopworks build from ${{ github.sha }}. C# packages are version ${TAG} on ${NUGET_SOURCE}."

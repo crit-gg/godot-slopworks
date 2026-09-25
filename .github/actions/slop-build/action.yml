@@ -1,0 +1,91 @@
+name: Build Slopworks Godot
+description: Build one Godot target through build.sh with a SCons cache kept per branch, then upload the binaries.
+
+inputs:
+  name:
+    description: Artifact and cache name.
+    required: true
+  platform:
+    description: SCons platform (linuxbsd or windows).
+    required: true
+  target:
+    description: SCons target (editor, template_debug or template_release).
+    required: true
+  scons-flags:
+    description: Extra SCons flags.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install MinGW
+      if: inputs.platform == 'windows'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mingw-w64
+        # Godot needs the posix thread model for std::thread.
+        sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+        sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+    - name: Install Linux build dependencies
+      if: inputs.platform == 'linuxbsd'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwayland-bin
+
+    - name: Setup Python and SCons
+      uses: ./.github/actions/godot-deps
+
+    - name: Download AccessKit
+      id: accesskit
+      shell: bash
+      run: |
+        if python ./misc/scripts/install_accesskit.py; then
+          echo "enabled=yes" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::AccessKit download failed. Building without screen reader support."
+          echo "enabled=no" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Keyed on the branch so every release run on it reuses the previous run's objects.
+    - name: Restore SCons cache
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ github.workspace }}/.scons_cache/
+        key: slop-${{ inputs.name }}|${{ github.ref_name }}|${{ github.sha }}
+        restore-keys: slop-${{ inputs.name }}|${{ github.ref_name }}|
+
+    - name: Build
+      shell: bash
+      run: |
+        echo "CACHE_TIMESTAMP=$(date +%s)" >> "$GITHUB_ENV"
+        PLATFORM=${{ inputs.platform }} ./build.sh \
+          target=${{ inputs.target }} \
+          ${{ env.SCONS_FLAGS }} ${{ inputs.scons-flags }} \
+          accesskit=${{ steps.accesskit.outputs.enabled }} \
+          "cache_path=${{ github.workspace }}/.scons_cache/" \
+          redirect_build_objects=no \
+          -j"$(nproc)"
+        ls -l bin/
+
+    - name: Purge stale cache entries
+      if: always()
+      shell: bash
+      run: misc/scripts/purge_cache.py "$CACHE_TIMESTAMP" "${{ github.workspace }}/.scons_cache/"
+
+    - name: Save SCons cache
+      if: always()
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ github.workspace }}/.scons_cache/
+        key: slop-${{ inputs.name }}|${{ github.ref_name }}|${{ github.sha }}
+
+    - name: Upload binaries
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.name }}
+        path: bin/godot.*
+        if-no-files-found: error
+        retention-days: 7
